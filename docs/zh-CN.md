@@ -21,7 +21,7 @@ npm run demo
 docker compose up --build
 ```
 
-Compose 使用命名卷保存数据库，Web 端口只发布到主机回环地址，数据库端口不发布到主机。数据库在 Compose 网络内使用 trust 认证，仅用于可信本地演示。发布验证使用临时 Postgres，尚未实际运行 Compose 路径。
+Compose 使用命名卷保存数据库，Web 端口只发布到主机回环地址，数据库端口不发布到主机。数据库在 Compose 网络内使用 trust 认证，仅用于可信本地演示。本地验证使用临时 Postgres；Compose 构建、启动及 API/Worker 冒烟检查已在 [GitHub Actions](https://github.com/linkangjun/agent-revision-lab/actions/runs/42522479080) 通过，未据此宣称生产可用或跨机器自动故障恢复。
 
 ## 跑一遍故障场景
 
