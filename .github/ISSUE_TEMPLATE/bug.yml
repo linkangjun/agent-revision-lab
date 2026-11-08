@@ -1,0 +1,22 @@
+name: Reproducible failure
+description: Report an invariant violation using a sanitized example.
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and observed behavior
+      description: Include the run state and what should have happened.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Commands, version, timing and synthetic inputs. No secrets or private data.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Node, PostgreSQL, operating system and whether the scripted model was used.

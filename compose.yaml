@@ -1,0 +1,31 @@
+# Trusted local demonstration only. The database is not published to the host.
+services:
+  db:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_DB: agent_revision_lab
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - lab-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d agent_revision_lab"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  lab:
+    build: .
+    ports: ["127.0.0.1:4317:4317"]
+    environment:
+      DATABASE_URL: postgresql://postgres@db:5432/agent_revision_lab
+      HOST: 0.0.0.0
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4317/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    init: true
+volumes:
+  lab-postgres:
