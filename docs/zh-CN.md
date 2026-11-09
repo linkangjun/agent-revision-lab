@@ -1,12 +1,14 @@
 # Agent Revision Lab 中文指南
 
+[完整中文 README](../README.zh-CN.md) · [English README](../README.md)
+
 [Agent Revision Lab](https://github.com/linkangjun/agent-revision-lab) 是一个 MIT 开源实验台，当前版本为 **0.1.0-alpha.1**。它用合成 API 文档演示一个实际问题：Agent 已经发出经批准的写请求，用户这时修改需求，或者 Worker 崩溃了，系统如何处理旧批准和丢失的回执？
 
 默认使用脚本模型，结果可复现，无需模型 API Key。OpenAI 适配器只完成了模拟 HTTP 协议测试，尚未验证真实模型调用。
 
 ## 本地运行
 
-准备 Node.js 22 或更高版本：
+准备 Node.js 22.12 或更高版本：
 
 ```sh
 git clone https://github.com/linkangjun/agent-revision-lab.git

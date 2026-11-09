@@ -10,7 +10,7 @@ uncertain tool outcomes, and crash recovery.
 [![CI](https://github.com/linkangjun/agent-revision-lab/actions/workflows/ci.yml/badge.svg)](https://github.com/linkangjun/agent-revision-lab/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-[Quick start](#try-it) · [Architecture](docs/architecture.md) · [中文](docs/zh-CN.md) · [Contributing](CONTRIBUTING.md)
+[Quick start](#try-it) · [Architecture](docs/architecture.md) · [中文 README](README.zh-CN.md) · [Contributing](CONTRIBUTING.md)
 
 </div>
 
@@ -37,7 +37,7 @@ npm ci
 npm run demo
 ```
 
-Open **http://127.0.0.1:4317**. The launcher starts a dedicated, ephemeral PostgreSQL server, API and separate DBOS worker. It does not connect to or change your existing databases. Stopping the demo removes that temporary database; restarting a *worker* during a running demo uses its surviving durable state.
+Open **http://127.0.0.1:4317**. The launcher starts a dedicated, ephemeral PostgreSQL server, API and separate DBOS worker. It does not connect to or change your existing databases. Stopping the demo removes that temporary database. If either child process exits, the launcher stops the entire demo and removes the temporary database too. To experiment with worker recovery, keep PostgreSQL running independently and restart a confirmed-stopped worker with the same executor ID; see [DBOS recovery](docs/dbos-notes.md#recovering-a-stopped-worker).
 
 For persistent local storage, use an existing disposable Postgres database via `DATABASE_URL`, or the included Compose definition:
 
