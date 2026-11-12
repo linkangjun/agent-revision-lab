@@ -1,6 +1,6 @@
 # Agent Revision Lab architecture
 
-Agent Revision Lab 0.1.0-alpha.1 is a single-user, local workbench for a synthetic API compatibility review. It demonstrates what happens when an agent's goal changes while an approved tool call is in flight. The default model is scripted. The OpenAI Chat Completions adapter has simulated HTTP protocol tests; this release has no live model evaluation.
+Agent Revision Lab 0.1.0-alpha.2 is a single-user, local workbench for a synthetic API compatibility review. It demonstrates what happens when an agent's goal changes while an approved tool call is in flight. The default model is scripted. The OpenAI Chat Completions adapter has simulated HTTP protocol tests; this release has no live model evaluation.
 
 ```mermaid
 flowchart LR
@@ -28,7 +28,7 @@ An approval is for one operation in one revision. Its stored argument hash binds
 
 ## Persistence and recovery
 
-The API commits run creation and DBOS enqueue in one Postgres transaction. Commands that need to wake a worker commit their state change and notification together. The notification is a wake signal; the worker reads the current goal and approvals from Postgres.
+The API commits run creation and DBOS enqueue in one Postgres transaction. Commands commit their state change and next execution enqueue together under the run row lock. Each execution checks the current execution ID before advancing the engine. At a business wait it completes and releases its queue slot. Lock contention instead schedules a delayed continuation. A separate durable deadline job expires normal unattended waits without running model or write logic. In-flight writes and errored executions defer expiry to preserve recovery and reconciliation; see the [deadline and recovery details](dbos-notes.md#short-executions-and-waiting-runs). The workbench uses the business run status, not a completed short execution, to decide whether a report succeeded.
 
 Each tick is a DBOS step. Before dispatching a write, the engine records the intent as `IN_FLIGHT`. If the process exits or a reply is lost, a later tick first looks up the original operation. A matching receipt confirms the effect. A missing or unverifiable receipt leaves an `UNKNOWN` operation and parks the run for manual reconciliation. The worker does not automatically resend the write. The fixture publisher uses an operation ID and argument hash to deduplicate submissions; arbitrary external systems need their own idempotency and lookup contracts.
 
@@ -45,6 +45,6 @@ The workbench displays the current revision, operation states, and a chronologic
 ## Verified scope and limits
 
 - `npm run test:integration` exercises real Postgres. The process recovery case uses DBOS and a real worker `SIGKILL`, then starts a replacement with the same executor ID and verifies that the old effect is reconciled without another dispatch.
-- The DBOS queue has a global concurrency limit of eight workflows. Workflows waiting for approval or reconciliation still occupy a slot. Multiple executors can pick up new work, but the alpha does not automatically detect or take over a different failed executor. There is no 10,000-run benchmark.
+- The DBOS queue has a global concurrency limit of eight workflows. Business runs waiting for approval or reconciliation release their active execution slot. Each run also has a delayed deadline job on the same queue; it becomes eligible after the deadline and checks current state. Queue delays mean this is not a real-time expiration guarantee. Multiple executors can pick up new work, but the alpha does not automatically detect or take over a different failed executor. There is no 10,000-run benchmark.
 - `npm run demo` starts a temporary Postgres cluster unless a database URL is supplied. Stopping the default demo discards its data. The included Compose configuration uses a named volume and leaves Postgres unexposed on the host; the Compose build/start and API/worker smoke passed in GitHub Actions (see [validation](validation.md)).
 - The API and workbench are for a trusted local user. The demo does not implement accounts, production tenant isolation, or a public service authentication boundary. The Compose database uses trust authentication inside the local Compose network.

@@ -3,11 +3,11 @@ import type { ClientBase } from 'pg';
 import { TransientError } from './core.js';
 
 export const APPLICATION_NAME = 'agent-revision-lab';
-export const APPLICATION_VERSION = '0.1.0-alpha.1';
+export const APPLICATION_VERSION = '0.1.0-alpha.2';
 export const RUN_QUEUE = 'agent-revision-lab-runs';
-const RUN_WORKFLOW = 'advanceAgentRun';
+const RUN_WORKFLOW = 'advanceAgentActivationV1';
+const DEADLINE_WORKFLOW = 'expireAgentRun';
 const WAKE_TOPIC = 'wake';
-const WAIT_SECONDS = 15;
 const RETRYABLE_CODES = new Set([
   '40001', '40P01', '55P03', // Serialization failure, deadlock, unavailable lock.
   '08000', '08001', '08003', '08006', '53300', '57P01', '57P02', '57P03',
@@ -15,12 +15,17 @@ const RETRYABLE_CODES = new Set([
   'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET',
 ]);
 
-export type TickResult = 'continue' | 'wait' | 'done';
-export type RuntimeTick = (runId: string) => Promise<TickResult>;
+export type TickResult = 'continue' | 'wait' | 'busy' | 'done';
+export type RuntimeTick = (runId: string, executionId: string) => Promise<TickResult>;
+export interface RuntimeHooks {
+  settle(runId: string, executionId: string, outcome: TickResult): Promise<TickResult>;
+  expire(runId: string): Promise<void>;
+}
 
 export interface RuntimeClient {
   /** When provided, transaction must be open on the same PostgreSQL database as DBOS. */
-  enqueueRun(runId: string, transaction?: ClientBase, executionId?: string): Promise<WorkflowHandle<void>>;
+  enqueueRun(runId: string, transaction?: ClientBase, executionId?: string, delaySeconds?: number): Promise<WorkflowHandle<void>>;
+  enqueueDeadline(runId: string, deadline: string, transaction: ClientBase): Promise<WorkflowHandle<void>>;
   /** Notifications wake the workflow; the application database holds authoritative command state. */
   wakeRun(executionId: string, commandId: string, transaction?: ClientBase): Promise<void>;
   /** Operator action: use only after confirming the named executor has stopped. */
@@ -43,7 +48,7 @@ function shouldRetryTick(error: unknown): boolean {
 }
 
 /** Bind the application step implementation before launching DBOS in a worker process. */
-export function attachRuntime(tick: RuntimeTick): void {
+export function attachRuntime(tick: RuntimeTick, hooks?: RuntimeHooks): void {
   if (attachedTick === tick) return;
   if (attachedTick) throw new Error('A runtime is already attached to this process');
   if (DBOS.isInitialized()) throw new Error('Attach the runtime before starting the worker');
@@ -53,7 +58,10 @@ export function attachRuntime(tick: RuntimeTick): void {
       // Only the outcome is checkpointed. An interrupted tick reloads application
       // state and checks authorization on its next dispatch. The app's operation
       // ledger, rather than this checkpoint, governs external writes.
-      const outcome = await DBOS.runStep(() => tick(runId), {
+      const outcome = await DBOS.runStep(async () => {
+        const result = await tick(runId, DBOS.workflowID!);
+        return hooks ? hooks.settle(runId, DBOS.workflowID!, result) : result;
+      }, {
         name: 'advance-run-v1',
         retriesAllowed: true,
         maxAttempts: 3,
@@ -61,14 +69,18 @@ export function attachRuntime(tick: RuntimeTick): void {
         backoffRate: 2,
         shouldRetry: shouldRetryTick,
       });
-      if (outcome === 'done') return;
-      if (outcome === 'wait') {
-        // Timeout also covers the app deadline and prompts a fresh state read.
-        // Notifications that arrived before recv are persisted by DBOS.
-        await DBOS.recv<string>(WAKE_TOPIC, WAIT_SECONDS);
-      }
+      // A business wait completes this activation and releases its queue slot.
+      // Commands and deadlines enqueue independent activations transactionally.
+      if (outcome !== 'continue') return;
     }
   }, { name: RUN_WORKFLOW });
+  DBOS.registerWorkflow(async (runId: string): Promise<void> => {
+    if (!hooks) throw new Error('The deadline workflow requires application hooks');
+    await DBOS.runStep(() => hooks.expire(runId), {
+      name: 'expire-run-v1', retriesAllowed: true, maxAttempts: 3,
+      intervalSeconds: 1, backoffRate: 2, shouldRetry: shouldRetryTick,
+    });
+  }, { name: DEADLINE_WORKFLOW });
   attachedTick = tick;
 }
 
@@ -113,17 +125,28 @@ export async function createRuntimeClient(
   });
 
   return {
-    enqueueRun(runId, transaction, executionId = runId) {
+    enqueueRun(runId, transaction, executionId = runId, delaySeconds = 0) {
       const enqueue = {
         queueName: RUN_QUEUE,
         workflowName: RUN_WORKFLOW,
         workflowID: executionId,
         appVersion: APPLICATION_VERSION,
         workflowIDReusePolicy: 'return-existing' as const,
+        delaySeconds,
       };
       return transaction
         ? client.enqueueInTransaction<(id: string) => Promise<void>>(transaction, enqueue, runId)
         : client.enqueue<(id: string) => Promise<void>>(enqueue, runId);
+    },
+    enqueueDeadline(runId, deadline, transaction) {
+      const deadlineMs = Date.parse(deadline);
+      if (!Number.isFinite(deadlineMs)) throw new Error('A valid run deadline is required');
+      return client.enqueueInTransaction<(id: string) => Promise<void>>(transaction, {
+        queueName: RUN_QUEUE, workflowName: DEADLINE_WORKFLOW,
+        workflowID: `${runId}:deadline`, appVersion: APPLICATION_VERSION,
+        workflowIDReusePolicy: 'return-existing',
+        delaySeconds: Math.max(0, (deadlineMs - Date.now()) / 1000),
+      }, runId);
     },
     wakeRun(executionId, commandId, transaction) {
       // The command ledger handles repeats after a notification was consumed.

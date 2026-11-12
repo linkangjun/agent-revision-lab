@@ -17,9 +17,10 @@ export interface Effects {
   lookup(operation: Operation, signal: AbortSignal): Promise<{ found: boolean; result?: unknown }>;
 }
 export interface EngineOptions { model?: Model; effects: Effects; callTimeoutMs?: number; allowedTools?: string[]; afterEffect?: (op: Operation) => Promise<void> }
+class SupersededActivation extends Error {}
 export class Engine {
   constructor(readonly store: Store, readonly options: EngineOptions) {}
-  async tick(id: string): Promise<'continue' | 'wait' | 'done'> {
+  async tick(id: string, executionId?: string): Promise<'continue' | 'wait' | 'busy' | 'done'> {
     const lock = await this.store.pool.connect();
     let held = false;
     const controller = new AbortController();
@@ -32,10 +33,16 @@ export class Engine {
     try {
       const r = await lock.query('SELECT pg_try_advisory_lock(hashtextextended($1,0)) AS held', ['arl:' + id]);
       held = r.rows[0].held;
-      if (!held) return 'wait';
-      const epoch = String((await lock.query('UPDATE arl_runs SET epoch=epoch+1 WHERE id=$1 RETURNING epoch', [id])).rows[0]?.epoch);
+      if (!held) return 'busy';
+      const claim = await lock.query(
+        'UPDATE arl_runs SET epoch=epoch+1 WHERE id=$1 AND ($2::text IS NULL OR COALESCE(data->>\'workflowId\',id)=$2) RETURNING epoch',
+        [id, executionId ?? null],
+      );
+      if (!claim.rowCount) return 'done';
+      const epoch = String(claim.rows[0].epoch);
       const mutate = async <T>(fn: (run: Run, c: PoolClient) => Promise<T>): Promise<T> => this.store.tx(async c => {
         const run = await this.store.get(id, c, true);
+        if (executionId && (run.workflowId ?? id) !== executionId) throw new SupersededActivation();
         const actual = String((await c.query('SELECT epoch FROM arl_runs WHERE id=$1', [id])).rows[0].epoch);
         if (controller.signal.aborted || actual !== epoch) throw new Error('Execution ownership changed');
         const value = await fn(run, c); await this.store.save(run, c); return value;
@@ -186,6 +193,11 @@ export class Engine {
         });
       }
       return 'continue';
+    } catch (error) {
+      // A command installed a newer activation. Any already-sent effect keeps
+      // its IN_FLIGHT intent; the new activation reconciles it before dispatch.
+      if (error instanceof SupersededActivation) return 'done';
+      throw error;
     } finally {
       if (held) await lock.query('SELECT pg_advisory_unlock(hashtextextended($1,0))', ['arl:' + id]).catch(() => {});
       lock.removeListener('error', lost);

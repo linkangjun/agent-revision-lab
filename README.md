@@ -68,7 +68,7 @@ Try **Revise goal** before approval. Old proposals become abandoned and require 
 | Deployment | Separate API/worker processes, shared Postgres, stable executor restart, explicit stopped-executor recovery |
 | Workbench | Goal revision, approval, timeline, context inspection, manual reconciliation, execution-error retry, redacted incident metadata |
 
-**Not yet claimed:** 10,000-agent capacity, automatic cross-worker failure detection, production authentication or tenant isolation, arbitrary-code isolation, exact provider token accounting, end-user adoption, or real-model quality benchmarks. The queue is capped at eight workflows and approval waits occupy workflow slots. See [roadmap](docs/roadmap.md).
+**Not yet claimed:** 10,000-agent capacity, automatic cross-worker failure detection, production authentication or tenant isolation, arbitrary-code isolation, exact provider token accounting, end-user adoption, or real-model quality benchmarks. The queue is capped at eight active workflows. Approval and reconciliation waits finish their short execution and release its slot; commands start a new execution and a separate durable deadline job expires unattended runs unless an in-flight write or execution error needs recovery first. This does not establish per-tenant fairness or throughput. See [roadmap](docs/roadmap.md).
 
 ## A small core, a durable backend
 

@@ -2,13 +2,15 @@ import { randomUUID } from 'node:crypto';
 import pg, { type PoolClient } from 'pg';
 import type { Command, Operation, Run, RunDetail, RunEvent, Scenario } from './contracts.js';
 import { canonicalHash } from './core.js';
+import type { TickResult } from './durable.js';
 
 export class Conflict extends Error { statusCode = 409; }
 export class Invalid extends Error { statusCode = 400; }
 export class Missing extends Error { statusCode = 404; }
 export const terminal = (status: string) => ['SUCCEEDED', 'FAILED', 'CANCELLED', 'EXPIRED'].includes(status);
 export interface Dispatcher {
-  enqueueRun(id: string, client?: PoolClient, executionId?: string): Promise<unknown>;
+  enqueueRun(id: string, client?: PoolClient, executionId?: string, delaySeconds?: number): Promise<unknown>;
+  enqueueDeadline?(id: string, deadline: string, client: PoolClient): Promise<unknown>;
   workflowStatus?(id: string): Promise<{status:string} | null>;
   wakeRun(id: string, commandId: string, client?: PoolClient): Promise<unknown>;
 }
@@ -65,7 +67,10 @@ export class Store {
       run.workflowId = run.id;
       await c.query('INSERT INTO arl_runs(id,data) VALUES($1,$2)', [run.id, JSON.stringify(run)]);
       await this.event(c, run, 'run.created', { model: run.model, scenario: run.scenario });
-      if (this.dispatcher) await this.dispatcher.enqueueRun(run.id, c);
+      if (this.dispatcher) {
+        await this.dispatcher.enqueueRun(run.id, c);
+        await this.dispatcher.enqueueDeadline?.(run.id, run.deadline, c);
+      }
       return run;
     });
   }
@@ -99,6 +104,8 @@ export class Store {
       if (run.revision !== cmd.expectedRevision) throw new Conflict('Goal changed. Refresh before submitting this command.');
       if (terminal(run.status) && cmd.kind !== 'reconcile') throw new Conflict('Run is terminal; create another run');
       const ops = await this.operations(id, c);
+      const previousExecution = run.workflowId ?? run.id;
+      let retrying = false;
       if (cmd.kind === 'revise') {
         if (typeof cmd.goal !== 'string' || !cmd.goal.trim() || cmd.goal.length > 4000) throw new Invalid('Goal must contain 1–4000 characters');
         await c.query('INSERT INTO arl_revisions(run_id,revision,snapshot) VALUES($1,$2,$3) ON CONFLICT DO NOTHING',[id,run.revision,JSON.stringify(run)]);
@@ -109,12 +116,10 @@ export class Store {
       } else if (cmd.kind === 'retry') {
         if (!this.dispatcher?.workflowStatus) throw new Invalid('Durable execution is not configured');
         if (ops.some(o => o.state === 'UNKNOWN')) throw new Conflict('Reconcile the unknown operation before retrying');
-        const previousExecution=run.workflowId ?? run.id;
         const execution=await this.dispatcher.workflowStatus(previousExecution);
         if (!execution || !['ERROR','MAX_RECOVERY_ATTEMPTS_EXCEEDED'].includes(execution.status)) throw new Conflict('Execution is not stopped with an error');
-        run.workflowId=randomUUID(); run.error=null;
-        await this.dispatcher.enqueueRun(run.id,c,run.workflowId);
-        await this.storeRecoveryEvent(c,run,previousExecution);
+        retrying = true;
+        run.error=null;
       } else if (cmd.kind === 'cancel') {
         run.status = 'CANCELLED';
         for (const op of ops) if (['PROPOSED','APPROVED'].includes(op.state)) { op.state = 'ABANDONED'; op.approvedUntil = null; await this.putOperation(op, c); }
@@ -137,10 +142,75 @@ export class Store {
         }
         await this.putOperation(op, c);
       }
+      if (this.dispatcher) {
+        const hasInFlight = ops.some(op => op.state === 'IN_FLIGHT');
+        const current = retrying ? undefined : await this.dispatcher.workflowStatus?.(previousExecution);
+        const stoppedWithError = current && ['ERROR','MAX_RECOVERY_ATTEMPTS_EXCEEDED'].includes(current.status);
+        // Editing a stopped run is not an implicit error retry. Its persisted
+        // changes are read when an explicit retry is accepted.
+        if ((!terminal(run.status) || hasInFlight) && (retrying || !stoppedWithError)) {
+          run.workflowId = `${id}:command:${canonicalHash(cmd.commandId).slice(0, 32)}`;
+          delete run.parkedExecutionId;
+          await this.dispatcher.enqueueRun(id, c, run.workflowId);
+          if (retrying) await this.storeRecoveryEvent(c,run,previousExecution);
+        }
+      }
       await this.save(run, c);
       await c.query('INSERT INTO arl_commands(run_id,id,hash,result) VALUES($1,$2,$3,$4)', [id, cmd.commandId, hash, JSON.stringify(run)]);
-      if (this.dispatcher && !terminal(run.status)) await this.dispatcher.wakeRun(run.workflowId ?? id, cmd.commandId, c);
       return run;
+    });
+  }
+  /** Serialize a wait/command handoff with the same run row used by commands. */
+  async settleActivation(id: string, executionId: string, outcome: TickResult): Promise<TickResult> {
+    return this.tx(async c => {
+      const run = await this.get(id, c, true);
+      if ((run.workflowId ?? id) !== executionId) return 'done';
+      if (outcome === 'continue' || outcome === 'done') return outcome;
+      if (outcome === 'wait' && (terminal(run.status) || run.status === 'WAITING_APPROVAL' || run.status === 'WAITING_RECONCILIATION')) {
+        if (run.parkedExecutionId !== executionId) {
+          run.parkedExecutionId = executionId;
+          await this.event(c, run, 'execution.waiting', { executionId, status: run.status });
+          await this.save(run, c);
+        }
+        return 'done';
+      }
+      // Advisory-lock contention is distinct from a business wait. Persist a
+      // delayed successor so this activation can yield
+      // fairly without dropping runnable work or occupying a slot with sleep.
+      if (!this.dispatcher) throw new Error('Activation handoff requires a durable dispatcher');
+      run.workflowId = `${id}:yield:${canonicalHash(executionId).slice(0, 32)}`;
+      delete run.parkedExecutionId;
+      await this.dispatcher.enqueueRun(id, c, run.workflowId, 0.2);
+      await this.event(c, run, 'execution.yielded', { executionId, successor: run.workflowId });
+      await this.save(run, c);
+      return 'done';
+    });
+  }
+  /** A deadline activation only expires business state; it never retries effects. */
+  async expireRun(id: string): Promise<void> {
+    await this.tx(async c => {
+      const run = await this.get(id, c, true);
+      if (terminal(run.status)) return;
+      if (Date.now() < Date.parse(run.deadline)) throw new Error('Deadline activation ran before the run deadline');
+      const ops = await this.operations(id, c);
+      const execution = await this.dispatcher?.workflowStatus?.(run.workflowId ?? id);
+      if (ops.some(op => op.state === 'IN_FLIGHT') ||
+        (execution && ['ERROR', 'MAX_RECOVERY_ATTEMPTS_EXCEEDED'].includes(execution.status))) {
+        // Keep explicit error retry/recovery reachable. In-flight work must be
+        // reconciled first, even if DBOS changes PENDING to ERROR just after our
+        // status read. The next successful activation enforces the overdue deadline.
+        await this.event(c, run, 'deadline.deferred', { reason: ops.some(op => op.state === 'IN_FLIGHT') ? 'in_flight_operation' : 'execution_error' });
+        return;
+      }
+      run.status = 'EXPIRED';
+      for (const op of ops) {
+        if (op.state === 'PROPOSED' || op.state === 'APPROVED') {
+          op.state = 'ABANDONED'; op.approvedUntil = null;
+          await this.putOperation(op, c);
+        }
+      }
+      await this.event(c, run, 'run.expired', { source: 'deadline', unresolvedOperationsPreserved: true });
+      await this.save(run, c);
     });
   }
   private async storeRecoveryEvent(c: PoolClient, run: Run, previousExecution: string) {

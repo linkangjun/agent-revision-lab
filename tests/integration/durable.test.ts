@@ -11,8 +11,9 @@ const databaseUrl = process.env.ARL_TEST_DATABASE_URL;
 const fixtureGoal = 'Compare stable v1 and v2, exclude beta, and publish a cited compatibility report.';
 const project = fileURLToPath(new URL('../../', import.meta.url));
 const workerEntry = fileURLToPath(new URL('../../src/worker.ts', import.meta.url));
+const handoffWorkerEntry = fileURLToPath(new URL('../fixtures/handoff-worker.ts', import.meta.url));
 type Exit = { code: number | null; signal: NodeJS.Signals | null };
-type Worker = { child: ChildProcess; exit?: Exit; ready: boolean; executorId: string };
+type Worker = { child: ChildProcess; exit?: Exit; ready: boolean; executorId: string; waitingBeforeHandoff?: string };
 
 async function poll<T>(check: () => Promise<T | undefined> | T | undefined, description: string, timeoutMs = 12_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
@@ -29,6 +30,7 @@ describe.skipIf(!databaseUrl)('durable workflow on a disposable PostgreSQL datab
   let apiUrl: string;
   const token = randomUUID().replaceAll('-', '');
   const workers = new Set<Worker>();
+  const runIds = new Set<string>();
   let publisherWrites = 0;
 
   beforeAll(async () => {
@@ -42,12 +44,12 @@ describe.skipIf(!databaseUrl)('durable workflow on a disposable PostgreSQL datab
 
   beforeEach(() => { publisherWrites = 0; });
 
-  async function startWorker(options: { executorId?: string; killAfterEffect?: boolean } = {}): Promise<Worker> {
+  async function startWorker(options: { executorId?: string; killAfterEffect?: boolean; pauseBeforeHandoff?: boolean } = {}): Promise<Worker> {
     const executorId = options.executorId ?? `integration-${randomUUID()}`;
     // Run the entry point directly in one process so SIGKILL targets the actual worker.
-    const child = spawn(process.execPath, ['--import', 'tsx', workerEntry], {
+    const child = spawn(process.execPath, ['--import', 'tsx', options.pauseBeforeHandoff ? handoffWorkerEntry : workerEntry], {
       cwd: project,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       env: {
         PATH: process.env.PATH,
         NODE_ENV: 'test',
@@ -61,13 +63,18 @@ describe.skipIf(!databaseUrl)('durable workflow on a disposable PostgreSQL datab
     const worker: Worker = { child, ready: false, executorId };
     child.once('error', () => { worker.exit = { code: null, signal: null }; });
     child.once('close', (code, signal) => { worker.exit = { code, signal }; });
+    child.on('message', message => {
+      if (message && typeof message === 'object' && 'waitingBeforeHandoff' in message) {
+        worker.waitingBeforeHandoff = String(message.waitingBeforeHandoff);
+      }
+    });
     let partial = '';
-    child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+    child.stdout!.setEncoding('utf8').on('data', (chunk: string) => {
       partial = (partial + chunk).slice(-4_096);
       if (partial.includes('Agent worker ready')) worker.ready = true;
     });
     // Do not include arbitrary child output or connection details in test logs.
-    child.stderr.resume();
+    child.stderr!.resume();
     workers.add(worker);
     return poll(() => {
       if (worker.exit) throw new Error(`Worker exited before readiness (code ${worker.exit.code}, signal ${worker.exit.signal})`);
@@ -76,6 +83,15 @@ describe.skipIf(!databaseUrl)('durable workflow on a disposable PostgreSQL datab
   }
 
   afterEach(async () => {
+    // End only this suite's unfinished runs before stopping workers. Otherwise a
+    // failed capacity assertion could leave pending workflows occupying the queue.
+    for (const id of runIds) {
+      const run = await app.store.get(id);
+      if (!['SUCCEEDED', 'FAILED', 'CANCELLED', 'EXPIRED'].includes(run.status)) {
+        await app.store.command(id, { kind: 'cancel', commandId: randomUUID(), expectedRevision: run.revision });
+      }
+    }
+    runIds.clear();
     for (const worker of workers) if (!worker.exit) worker.child.kill('SIGTERM');
     try {
       await poll(() => [...workers].every(w => w.exit) ? true : undefined, 'worker shutdown', 5_000);
@@ -103,6 +119,7 @@ describe.skipIf(!databaseUrl)('durable workflow on a disposable PostgreSQL datab
   async function createRun(scenario: Scenario): Promise<string> {
     const response = await request<{ id: string }>('/api/runs', { goal: fixtureGoal, scenario, model: 'scripted' });
     expect(response.status).toBe(201);
+    runIds.add(response.data.id);
     return response.data.id;
   }
 
@@ -136,6 +153,122 @@ describe.skipIf(!databaseUrl)('durable workflow on a disposable PostgreSQL datab
   function approval(op: Operation): Command {
     return { commandId: randomUUID(), expectedRevision: op.revision, kind: 'approve', operationId: op.id };
   }
+
+  it('admits another run while all eight execution slots have reached approval waits', async () => {
+    await startWorker();
+    const waitingIds: string[] = [];
+    for (let i = 0; i < 8; i++) waitingIds.push(await createRun('clean'));
+    await Promise.all(waitingIds.map(id => waitForStatus(id, 'WAITING_APPROVAL')));
+
+    const ninthId = await createRun('clean');
+    await waitForStatus(ninthId, 'WAITING_APPROVAL');
+    const all = await Promise.all([...waitingIds, ninthId].map(detail));
+    expect(all.every(d => d.run.status === 'WAITING_APPROVAL')).toBe(true);
+    expect(all.every(d => d.reports.length === 0 && d.operations.every(op => op.attempts === 0))).toBe(true);
+    expect(publisherWrites).toBe(0);
+  }, 60_000);
+
+  it('expires an approval wait without receiving another user command', async () => {
+    await startWorker();
+    const run = await app.store.create({ goal: fixtureGoal, scenario: 'clean', model: 'scripted', durationMs: 2_500 });
+    runIds.add(run.id);
+    const waiting = await waitForStatus(run.id, 'WAITING_APPROVAL');
+    await poll(async () => (await detail(run.id)).run.status === 'EXPIRED' ? true : undefined, 'deadline wake without a command', 10_000);
+    const expired = await detail(run.id);
+    expect(expired.run.turns).toBe(waiting.run.turns);
+    expect(expired.reports).toHaveLength(0);
+    expect(expired.operations.every(op => op.attempts === 0)).toBe(true);
+    expect(publisherWrites).toBe(0);
+  }, 30_000);
+
+  it('keeps commands received before execution and deduplicates commands after waiting', async () => {
+    const id = await createRun('clean');
+    const revise: Command = {
+      kind: 'revise', commandId: randomUUID(), expectedRevision: 1,
+      goal: 'Compare stable v1 and v2, exclude beta, and include pagination in the cited compatibility report.',
+    };
+    const changed = await command(id, revise);
+    expect(changed.status).toBe(200);
+    expect(await command(id, revise)).toEqual(changed);
+    await startWorker();
+    const waiting = await waitForStatus(id, 'WAITING_APPROVAL');
+    const op = proposal(waiting);
+    expect(waiting.run.revision).toBe(2);
+    expect(op.args).toMatchObject({ report: expect.stringContaining('ev_orders_limit') });
+
+    const approve = approval(op);
+    const accepted = await command(id, approve);
+    expect(accepted.status).toBe(200);
+    expect(await command(id, approve)).toEqual(accepted);
+    const done = await waitForStatus(id, 'SUCCEEDED');
+    expect(done.events.filter(e => e.type === 'goal.revised')).toHaveLength(1);
+    expect(done.events.filter(e => e.type === 'operation.approved')).toHaveLength(1);
+    expect(done.reports).toHaveLength(1);
+    expect(publisherWrites).toBe(1);
+  }, 60_000);
+
+  it('cancels an approval wait without authorizing or dispatching a write', async () => {
+    await startWorker();
+    const id = await createRun('clean');
+    const waiting = await waitForStatus(id, 'WAITING_APPROVAL');
+    const op = proposal(waiting);
+    const cancel: Command = { kind: 'cancel', commandId: randomUUID(), expectedRevision: 1 };
+    const accepted = await command(id, cancel);
+    expect(accepted.status).toBe(200);
+    expect(await command(id, cancel)).toEqual(accepted);
+    expect((await command(id, approval(op))).status).toBe(409);
+    await poll(async () => (await app.runtime.workflowStatus(accepted.data.workflowId ?? id))?.status === 'SUCCESS' ? true : undefined, 'cancelled activation completion');
+    const cancelled = await detail(id);
+    expect(cancelled.run.status).toBe('CANCELLED');
+    expect(cancelled.operations).toMatchObject([{ state: 'ABANDONED', attempts: 0 }]);
+    expect(cancelled.reports).toHaveLength(0);
+    expect(publisherWrites).toBe(0);
+  }, 30_000);
+
+  it.skipIf(process.platform === 'win32')('preserves a completed approval handoff across worker death and an offline command', async () => {
+    const original = await startWorker();
+    const id = await createRun('clean');
+    const waiting = await waitForStatus(id, 'WAITING_APPROVAL');
+    const op = proposal(waiting);
+    await poll(async () => (await app.runtime.workflowStatus(id))?.status === 'SUCCESS' ? true : undefined, 'completed initial activation');
+
+    original.child.kill('SIGKILL');
+    expect((await poll(() => original.exit, 'stopped approval worker')).signal).toBe('SIGKILL');
+    // Persist the approval while no worker is alive; no process-local wakeup can
+    // carry this command to the replacement.
+    const approve = approval(op);
+    const accepted = await command(id, approve);
+    expect(accepted.status).toBe(200);
+    expect(await command(id, approve)).toEqual(accepted);
+    const replacement = await startWorker({ executorId: original.executorId });
+    expect(replacement.child.pid).not.toBe(original.child.pid);
+
+    const done = await waitForStatus(id, 'SUCCEEDED');
+    expect(done.reports).toHaveLength(1);
+    expect(done.operations).toMatchObject([{ id: op.id, attempts: 1, state: 'CONFIRMED' }]);
+    expect(done.events.filter(e => e.type === 'operation.approved')).toHaveLength(1);
+    expect(publisherWrites).toBe(1);
+  }, 60_000);
+
+  it('keeps an approval committed between the waiting state and activation handoff', async () => {
+    const worker = await startWorker({ pauseBeforeHandoff: true });
+    const id = await createRun('clean');
+    await poll(() => worker.waitingBeforeHandoff === id ? true : undefined, 'paused waiting handoff');
+    const waiting = await detail(id);
+    expect(waiting.run.status).toBe('WAITING_APPROVAL');
+    const op = proposal(waiting);
+    const approve = approval(op);
+    const accepted = await command(id, approve);
+    expect(accepted.status).toBe(200);
+    expect(await command(id, approve)).toEqual(accepted);
+    worker.child.send('release-handoff');
+
+    const done = await waitForStatus(id, 'SUCCEEDED');
+    expect(done.operations).toMatchObject([{ id: op.id, state: 'CONFIRMED', attempts: 1 }]);
+    expect(done.events.filter(e => e.type === 'operation.approved')).toHaveLength(1);
+    expect(done.reports).toHaveLength(1);
+    expect(publisherWrites).toBe(1);
+  }, 60_000);
 
   it('publishes a clean report only after approval and deduplicates the approval command', async () => {
     await startWorker();

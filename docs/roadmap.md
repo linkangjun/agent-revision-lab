@@ -12,7 +12,8 @@ The alpha is a working reference, not a finished production runtime. Future work
 - [ ] Provider-authoritative token/usage accounting and monetary budgets.
 - [ ] Artifact storage and provenance-preserving semantic summaries beyond grouped history trimming.
 - [ ] Secure multi-user deployment and authentication before any hosted version.
-- [ ] Queue semantics that release capacity while waiting; per-tenant fairness and rate budgets.
+- [x] Short executions that release queue capacity while waiting, with durable deadline checks.
+- [ ] Per-tenant fairness and rate budgets.
 - [ ] Automatic failure detection and safe cross-worker takeover, including partitions and rolling upgrades.
 - [ ] Published 10,000-active-run measurements, including long waits and hardware/configuration details.
 - [ ] Framework integrations selected from actual demand, not an integration-count target.
