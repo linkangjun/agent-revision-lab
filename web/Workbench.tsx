@@ -270,6 +270,7 @@ function RunView({ id, onChange }: { id: string; onChange: () => void }) {
   const ended = terminal.has(run.status);
   const executionStopped = execution?.status === 'ERROR' || execution?.status === 'MAX_RECOVERY_ATTEMPTS_EXCEEDED';
   const needsReconciliation = operations.some(operation => operation.state === 'UNKNOWN');
+  const receiptRecovery = ended && operations.some(operation => operation.state === 'IN_FLIGHT');
   return <div className="run-layout">
     <main id="workspace" className="run-main">
       <header className="run-heading">
@@ -285,9 +286,9 @@ function RunView({ id, onChange }: { id: string; onChange: () => void }) {
         </div>
         {executionStopped && <section className="error-notice" aria-label="Execution stopped">
           <p role="alert"><strong>Execution stopped.</strong> Your run state is preserved.</p>
-          {ended ? <p>This run has ended.</p> : needsReconciliation ? <p>Reconcile the unknown tool outcome before retrying execution.</p> : null}
-          <div className="actions"><button type="button" className="button outline" disabled={busy || ended || needsReconciliation}
-            onClick={() => void command({ kind: 'retry', expectedRevision: run.revision })}>Retry execution</button></div>
+          {needsReconciliation ? <p>Reconcile the unknown tool outcome before retrying execution.</p> : receiptRecovery ? <p>This run stays ended. Recovery only checks the pending write outcome.</p> : ended ? <p>This run has ended.</p> : null}
+          <div className="actions"><button type="button" className="button outline" disabled={busy || (ended && !receiptRecovery) || needsReconciliation}
+            onClick={() => void command({ kind: 'retry', expectedRevision: run.revision })}>{receiptRecovery ? 'Recover pending receipt' : 'Retry execution'}</button></div>
         </section>}
         {form && <CommandPanel key={form.kind === 'reconcile' ? form.kind + form.operationId + form.revision : form.kind + form.revision} form={form} run={run} operation={form.kind === 'reconcile' ? operations.find(operation => operation.id === form.operationId) : undefined} busy={busy} onClose={() => setForm(undefined)} onSubmit={command} />}
         {error && <ErrorNotice>Could not refresh this run: {error}</ErrorNotice>}

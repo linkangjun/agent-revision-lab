@@ -22,7 +22,11 @@ Independent executors can take queued work. This release does not automatically 
 
 ## Retrying a failed execution
 
-An execution that ends in `ERROR` or `MAX_RECOVERY_ATTEMPTS_EXCEEDED` stays available for inspection. Address the cause before issuing the explicit retry command. It atomically creates a new execution for the same run and retains the goal, revision and operation history. Ordinary commands and the deadline job must not silently retry an errored execution. Resolve unknown operations before retrying.
+An execution that ends in `ERROR` or `MAX_RECOVERY_ATTEMPTS_EXCEEDED` stays available for inspection. Address the cause before issuing the explicit retry command. It atomically creates a new execution for the same run and retains the goal, revision and operation history. Ordinary commands and the deadline job must not silently retry an errored execution. Resolve unknown operations before retrying. If an ended run still has an `IN_FLIGHT` operation, an explicit retry is allowed only for receipt recovery after an execution error. The run stays ended: the engine queries the existing operation and never calls the model or dispatches a new write. If lookup cannot confirm the outcome, the operation becomes `UNKNOWN` for manual reconciliation. Ended runs without in-flight operations cannot be retried.
+
+## Upgrading from alpha.2
+
+alpha.3 preserves the alpha.2 durable checkpoint contract and DBOS application version (`0.1.0-alpha.2`); the package, health and export release version is `0.1.0-alpha.3`. No schema or workflow step-order change is introduced. Stop old API/workers before replacing them together, retain the same database and stable worker executor IDs, and then use explicit receipt recovery for a stopped execution. Do not run two workers with the same executor ID. This does not add rolling-upgrade or cross-host takeover guarantees.
 
 ## Upgrading from alpha.1
 

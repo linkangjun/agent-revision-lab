@@ -1,6 +1,6 @@
 # Agent Revision Lab architecture
 
-Agent Revision Lab 0.1.0-alpha.2 is a single-user, local workbench for a synthetic API compatibility review. It demonstrates what happens when an agent's goal changes while an approved tool call is in flight. The default model is scripted. The OpenAI Chat Completions adapter has simulated HTTP protocol tests; this release has no live model evaluation.
+Agent Revision Lab 0.1.0-alpha.3 is a single-user, local workbench for a synthetic API compatibility review. It demonstrates what happens when an agent's goal changes while an approved tool call is in flight. The default model is scripted. The OpenAI Chat Completions adapter has simulated HTTP protocol tests; this release has no live model evaluation.
 
 ```mermaid
 flowchart LR

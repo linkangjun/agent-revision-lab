@@ -33,7 +33,7 @@ export async function startServer(options: {databaseUrl: string; internalToken: 
       if (req.headers.origin && ![`http://localhost:${port}`, `http://127.0.0.1:${port}`].includes(req.headers.origin)) { json(res,403,{error:'Cross-origin access denied'});return; }
       const url = new URL(req.url ?? '/', 'http://localhost');
       const path = url.pathname;
-      if (path === '/api/health') { await store.pool.query('SELECT 1'); json(res,200,{status:'ok',mode:'local',version:'0.1.0-alpha.2'});return; }
+      if (path === '/api/health') { await store.pool.query('SELECT 1'); json(res,200,{status:'ok',mode:'local',version:'0.1.0-alpha.3'});return; }
       if (path.startsWith('/internal/')) {
         const token = req.headers['x-lab-internal-token'];
         if (typeof token !== 'string' || !sameSecret(token, options.internalToken)) { json(res,403,{error:'Internal service authentication required'});return; }
@@ -75,7 +75,7 @@ export async function startServer(options: {databaseUrl: string; internalToken: 
         if (action === 'export' && req.method === 'GET') {
           const detail = await store.detail(id);
           const safeFields = new Set(['operationId','operationRevision','staleForCurrentGoal','epoch','argsHash','expiresAt','automaticRedispatch','previousRevision','approvalsInvalidated','inFlightCannotBeRetracted','estimatedTokens','omittedMessages','tokenCounter','turn','model','scenario','reason','tool','evidenceCount','tools','responseRevision','resolution']);
-          const exported = {format:'agent-revision-lab/incident-v1',version:'0.1.0-alpha.2',redaction:'Goal, prompts, tool inputs/results, reports and operator notes omitted. Identifiers and hashes retained. This is diagnostic metadata, not deterministic model replay.',run:{id,revision:detail.run.revision,status:detail.run.status,model:detail.run.model,scenario:detail.run.scenario},operations:detail.operations.map(o => ({id:o.id,revision:o.revision,state:o.state,argsHash:o.argsHash,attempts:o.attempts})),events:detail.events.map(e => ({...e,detail:Object.fromEntries(Object.entries(e.detail).filter(([k]) => safeFields.has(k)))}))};
+          const exported = {format:'agent-revision-lab/incident-v1',version:'0.1.0-alpha.3',redaction:'Goal, prompts, tool inputs/results, reports and operator notes omitted. Identifiers and hashes retained. This is diagnostic metadata, not deterministic model replay.',run:{id,revision:detail.run.revision,status:detail.run.status,model:detail.run.model,scenario:detail.run.scenario},operations:detail.operations.map(o => ({id:o.id,revision:o.revision,state:o.state,argsHash:o.argsHash,attempts:o.attempts})),events:detail.events.map(e => ({...e,detail:Object.fromEntries(Object.entries(e.detail).filter(([k]) => safeFields.has(k)))}))};
           res.setHeader('content-disposition',`attachment; filename="incident-${id}.json"`);json(res,200,exported);return;
         }
       }

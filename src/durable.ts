@@ -3,6 +3,8 @@ import type { ClientBase } from 'pg';
 import { TransientError } from './core.js';
 
 export const APPLICATION_NAME = 'agent-revision-lab';
+// Durable checkpoint contract version, not the package release version.
+// alpha.3 changes command authorization only and preserves alpha.2 checkpoints.
 export const APPLICATION_VERSION = '0.1.0-alpha.2';
 export const RUN_QUEUE = 'agent-revision-lab-runs';
 const RUN_WORKFLOW = 'advanceAgentActivationV1';

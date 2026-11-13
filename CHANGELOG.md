@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.0-alpha.3 — 2026-11-13
+
+Fix receipt recovery after a failed execution is cancelled. Previously, an in-flight write could be stranded: retry rejected the ended run, while manual reconciliation required an UNKNOWN outcome. An explicit retry is now permitted only when an in-flight operation remains and the execution stopped with an error. The workbench calls this **Recover pending receipt**. The run stays ended, no model or new write is invoked, and an unconfirmed lookup moves to manual reconciliation.
+
+The durable checkpoint contract remains alpha.2; package, health and export release versions are alpha.3. Stop and replace API/workers together while retaining the database and stable executor IDs. No alpha.1 checkpoint migration or rolling-upgrade guarantee is added.
+
+Validation: 29 unit/UI tests, 45 PostgreSQL integration tests, type checks and build passed. A real worker/DBOS/HTTP regression fails before the fix (retry returns 409) and passes after it: one original POST, one receipt lookup, one report, no additional model turn and status still CANCELLED. MAX_RECOVERY and no-lookup controls use real PostgreSQL with mocked execution status/effects. See [validation](docs/validation.md).
+
 ## 0.1.0-alpha.2 — 2026-11-12
 
 Approval and reconciliation waits now complete a short durable execution and release its queue slot. Eight waiting runs no longer prevent the next run from reaching approval. Commands atomically enqueue a new execution with their state change; execution fencing and delayed lock-contention continuations preserve handoffs without a second scheduler.
