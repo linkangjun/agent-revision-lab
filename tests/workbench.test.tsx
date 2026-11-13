@@ -158,6 +158,35 @@ describe('Agent Revision Lab workbench', () => {
     expect(commands).toHaveLength(0);
   });
 
+  it.each(['ERROR', 'MAX_RECOVERY_ATTEMPTS_EXCEEDED'])('offers receipt recovery for a cancelled run with an in-flight write and %s', async status => {
+    const commands = backend(detail({
+      execution: { status }, run: { ...run, status: 'CANCELLED' },
+      operations: [{ ...operation, state: 'IN_FLIGHT', attempts: 1 }],
+    }));
+    const user = userEvent.setup();
+    render(<Workbench />);
+    const recover = await screen.findByRole('button', { name: 'Recover pending receipt' }) as HTMLButtonElement;
+    expect(recover.disabled).toBe(false);
+    expect(screen.getByText('This run stays ended. Recovery only checks the pending write outcome.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Cancel run' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Revise goal' })).toBeNull();
+    expect(commands).toHaveLength(0);
+    await user.click(recover);
+    await waitFor(() => expect(commands[0]).toMatchObject({ kind: 'retry', expectedRevision: 2, commandId: expect.any(String) }));
+  });
+
+  it('requires manual reconciliation before recovering another pending receipt', async () => {
+    const commands = backend(detail({
+      execution: { status: 'ERROR' }, run: { ...run, status: 'CANCELLED' },
+      operations: [{ ...operation, state: 'IN_FLIGHT' }, { ...operation, id: 'unknown-op', state: 'UNKNOWN' }],
+    }));
+    render(<Workbench />);
+    const recover = await screen.findByRole('button', { name: 'Recover pending receipt' }) as HTMLButtonElement;
+    expect(recover.disabled).toBe(true);
+    expect(screen.getByText('Reconcile the unknown tool outcome before retrying execution.')).toBeTruthy();
+    expect(commands).toHaveLength(0);
+  });
+
   it('discards a stale detail request when the selection changes', async () => {
     const secondRun = { ...run, id: 'run-second', goal: 'Verify the second API' };
     let finishFirst: ((response: Response) => void) | undefined;

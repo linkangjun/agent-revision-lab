@@ -1,5 +1,18 @@
 # Release validation
 
+## 0.1.0-alpha.3 — 2026-11-13 (Asia/Shanghai)
+
+- `npm run verify` passed: TypeScript, 29 unit/UI tests, and production build.
+- `npm run test:integration` passed: 45 tests across six files on isolated PostgreSQL. Existing actual SIGKILL and HTTP dispatch-count tests remain.
+- A new real worker commits a synthetic HTTP report, withholds the receipt, then fails outside the engine handler so DBOS records ERROR. After cancellation, explicit retry recovers the receipt: actual POST count 1, actual GET count 1, report count 1, attempts 1, unchanged model turns and CANCELLED state. The same regression failed before the fix with HTTP 409 on retry.
+- Focused Store regressions failed before the fix and passed after it. They use real PostgreSQL with mocked dispatcher/effects for ERROR and MAX_RECOVERY_ATTEMPTS_EXCEEDED, successful lookup and no-lookup/manual reconciliation, duplicate commands, normal terminal rejection and PENDING rejection. MAX_RECOVERY is not an actual DBOS recovery-exhaustion experiment.
+- Three new UI cases failed before the fix and passed after it; the UI suite now has 13 tests. These tests mock fetch, so they do not establish browser/server integration by themselves.
+- Isolated Edge headless browser smoke passed goal revision, approval, lost-receipt lookup, manual reconciliation, trace export and mobile width. The new recovery button is covered by the UI tests; this browser smoke covers the existing end-to-end flows.
+- Changed worker fixture and integration files passed a dedicated strict TypeScript check.
+- npm audit against the official registry returned zero vulnerabilities for the unchanged dependencies.
+
+The fix keeps the alpha.2 durable checkpoint contract and changes command eligibility for receipt recovery; it does not reopen terminal goals. No model-quality, scale, tenant-isolation, rolling-upgrade or cross-host takeover validation was added. See [upgrade guidance](dbos-notes.md#upgrading-from-alpha2).
+
 ## 0.1.0-alpha.2 — 2026-11-12 (Asia/Shanghai)
 
 - `npm run verify` passed: TypeScript checks, 26 unit/UI tests, and Vite production build.

@@ -12,6 +12,7 @@ const fixtureGoal = 'Compare stable v1 and v2, exclude beta, and publish a cited
 const project = fileURLToPath(new URL('../../', import.meta.url));
 const workerEntry = fileURLToPath(new URL('../../src/worker.ts', import.meta.url));
 const handoffWorkerEntry = fileURLToPath(new URL('../fixtures/handoff-worker.ts', import.meta.url));
+const erroredEffectWorkerEntry = fileURLToPath(new URL('../fixtures/errored-effect-worker.ts', import.meta.url));
 type Exit = { code: number | null; signal: NodeJS.Signals | null };
 type Worker = { child: ChildProcess; exit?: Exit; ready: boolean; executorId: string; waitingBeforeHandoff?: string };
 
@@ -32,6 +33,7 @@ describe.skipIf(!databaseUrl)('durable workflow on a disposable PostgreSQL datab
   const workers = new Set<Worker>();
   const runIds = new Set<string>();
   let publisherWrites = 0;
+  let publisherLookups = 0;
 
   beforeAll(async () => {
     app = await startServer({ databaseUrl: databaseUrl!, internalToken: token, port: 0 });
@@ -39,15 +41,16 @@ describe.skipIf(!databaseUrl)('durable workflow on a disposable PostgreSQL datab
     // Count actual HTTP write attempts, including duplicates the publisher would deduplicate.
     app.server.prependListener('request', req => {
       if (req.method === 'POST' && req.url === '/internal/reports') publisherWrites++;
+      if (req.method === 'GET' && req.url?.startsWith('/internal/reports/')) publisherLookups++;
     });
   }, 60_000);
 
-  beforeEach(() => { publisherWrites = 0; });
+  beforeEach(() => { publisherWrites = 0; publisherLookups = 0; });
 
-  async function startWorker(options: { executorId?: string; killAfterEffect?: boolean; pauseBeforeHandoff?: boolean } = {}): Promise<Worker> {
+  async function startWorker(options: { executorId?: string; killAfterEffect?: boolean; pauseBeforeHandoff?: boolean; errorAfterEffect?: boolean } = {}): Promise<Worker> {
     const executorId = options.executorId ?? `integration-${randomUUID()}`;
     // Run the entry point directly in one process so SIGKILL targets the actual worker.
-    const child = spawn(process.execPath, ['--import', 'tsx', options.pauseBeforeHandoff ? handoffWorkerEntry : workerEntry], {
+    const child = spawn(process.execPath, ['--import', 'tsx', options.errorAfterEffect ? erroredEffectWorkerEntry : options.pauseBeforeHandoff ? handoffWorkerEntry : workerEntry], {
       cwd: project,
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       env: {
@@ -290,6 +293,51 @@ describe.skipIf(!databaseUrl)('durable workflow on a disposable PostgreSQL datab
     expect(done.reports[0]).toMatchObject({ operationId: op.id, revision: 1, report: expect.stringContaining('ev_users_name') });
     expect(done.operations).toMatchObject([{ id: op.id, attempts: 1, state: 'CONFIRMED' }]);
     expect(done.events.filter(e => e.type === 'operation.approved')).toHaveLength(1);
+  }, 60_000);
+
+  it('reconciles a cancelled run after a durable error without dispatching another HTTP write', async () => {
+    await startWorker({ errorAfterEffect: true });
+    const id = await createRun('clean');
+    const op = proposal(await waitForStatus(id, 'WAITING_APPROVAL'));
+    expect((await command(id, approval(op))).status).toBe(200);
+
+    // The fixture first commits the real HTTP effect, then stops the DBOS
+    // execution with a permanent error before a receipt can be recorded.
+    const stopped = await poll(async () => {
+      const state = await detail(id);
+      return state.execution?.status === 'ERROR' ? state : undefined;
+    }, 'durable error after the HTTP effect');
+    expect(stopped.run.status).toBe('RUNNING');
+    expect(stopped.operations).toMatchObject([{ id: op.id, state: 'IN_FLIGHT', attempts: 1 }]);
+    expect(stopped.reports).toHaveLength(1);
+    expect(publisherWrites).toBe(1);
+    expect(publisherLookups).toBe(0);
+
+    const cancelled = await command(id, { kind: 'cancel', commandId: randomUUID(), expectedRevision: 1 });
+    expect(cancelled.status).toBe(200);
+    expect(cancelled.data.status).toBe('CANCELLED');
+    expect((await detail(id)).execution?.status).toBe('ERROR');
+    const retry: Command = { kind: 'retry', commandId: randomUUID(), expectedRevision: 1 };
+    const resumed = await command(id, retry);
+    expect(resumed.status).toBe(200);
+    expect(resumed.data.status).toBe('CANCELLED');
+    expect(await command(id, retry)).toEqual(resumed);
+
+    const reconciled = await poll(async () => {
+      const state = await detail(id);
+      return state.operations[0]?.state === 'CONFIRMED' && state.execution?.status === 'SUCCESS' ? state : undefined;
+    }, 'receipt-only recovery of the cancelled run');
+    expect(reconciled.run).toMatchObject({ status: 'CANCELLED', revision: 1, turns: stopped.run.turns });
+    expect(reconciled.operations).toMatchObject([{ id: op.id, state: 'CONFIRMED', attempts: 1 }]);
+    expect(reconciled.reports).toHaveLength(1);
+    expect(publisherWrites).toBe(1);
+    expect(publisherLookups).toBe(1);
+    expect(reconciled.events.filter(event => event.type === 'operation.dispatched')).toHaveLength(1);
+    expect(reconciled.events.filter(event => event.type === 'execution.restarted')).toHaveLength(1);
+    expect(reconciled.events).toContainEqual(expect.objectContaining({
+      type: 'operation.recovered',
+      detail: expect.objectContaining({ operationId: op.id, staleForCurrentGoal: true }),
+    }));
   }, 60_000);
 
   it('recovers a lost HTTP receipt without dispatching a second write', async () => {

@@ -102,8 +102,11 @@ export class Store {
         return duplicate.rows[0].result as Run;
       }
       if (run.revision !== cmd.expectedRevision) throw new Conflict('Goal changed. Refresh before submitting this command.');
-      if (terminal(run.status) && cmd.kind !== 'reconcile') throw new Conflict('Run is terminal; create another run');
       const ops = await this.operations(id, c);
+      // A terminal goal stays terminal, but a stopped execution may still need
+      // to look up an already-dispatched write. This exception cannot reopen the goal.
+      const receiptRecovery = cmd.kind === 'retry' && ops.some(op => op.state === 'IN_FLIGHT');
+      if (terminal(run.status) && cmd.kind !== 'reconcile' && !receiptRecovery) throw new Conflict('Run is terminal; create another run');
       const previousExecution = run.workflowId ?? run.id;
       let retrying = false;
       if (cmd.kind === 'revise') {

@@ -55,7 +55,7 @@ Compose binds the workbench to localhost and does not publish Postgres. Its isol
 2. **Lost receipt:** the demo service commits the report and closes the connection. The worker queries the same operation and recovers without another POST.
 3. **No lookup:** the same uncertain write has no lookup contract. The run waits. Inspect the synthetic report and record an explicit manual resolution; it does not silently retry.
 
-Try **Revise goal** before approval. Old proposals become abandoned and require a new approval. The automated crash test goes further: it kills a real worker after the remote commit, revises the goal, and starts a replacement worker. The old operation is reconciled without advancing the new revision.
+Try **Revise goal** before approval. Old proposals become abandoned and require a new approval. The automated crash test goes further: it kills a real worker after the remote commit, revises the goal, and starts a replacement worker. The old operation is reconciled without advancing the new revision. If an execution fails with an in-flight write and the run is then cancelled, **Recover pending receipt** explicitly checks that write while keeping the run cancelled. A missing receipt requires manual reconciliation; it does not resend the write.
 
 ## What is implemented
 

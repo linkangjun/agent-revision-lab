@@ -2,7 +2,7 @@
 
 [完整中文 README](../README.zh-CN.md) · [English README](../README.md)
 
-[Agent Revision Lab](https://github.com/linkangjun/agent-revision-lab) 是一个 MIT 开源实验台，当前版本为 **0.1.0-alpha.2**。它用合成 API 文档演示一个实际问题：Agent 已经发出经批准的写请求，用户这时修改需求，或者 Worker 崩溃了，系统如何处理旧批准和丢失的回执？
+[Agent Revision Lab](https://github.com/linkangjun/agent-revision-lab) 是一个 MIT 开源实验台，当前版本为 **0.1.0-alpha.3**。它用合成 API 文档演示一个实际问题：Agent 已经发出经批准的写请求，用户这时修改需求，或者 Worker 崩溃了，系统如何处理旧批准和丢失的回执？
 
 默认使用脚本模型，结果可复现，无需模型 API Key。OpenAI 适配器只完成了模拟 HTTP 协议测试，尚未验证真实模型调用。
 
@@ -45,6 +45,14 @@ Compose 使用命名卷保存数据库，Web 端口只发布到主机回环地�
 
 这是一套面向本机可信单用户的实验环境。技术细节见[架构说明](architecture.md)和 [DBOS 恢复说明](dbos-notes.md)。
 
+## 已结束任务的回执恢复
+
+若外部写入已发出、执行随后报错，即使任务已取消，仍可点击 **Recover pending receipt** 显式查询原操作回执。任务保持结束，不会重新调用模型或发送写请求；查不到结果则进入人工对账。没有进行中写入的已结束任务仍不能重试。
+
+## 从 alpha.2 升级
+
+alpha.3 沿用 alpha.2 的持久执行合同和 DBOS 应用版本，保留现有数据库与稳定执行器 ID。先停止旧 API/Worker，再一起替换，不并行运行同 ID 的 Worker。软件包、健康接口和导出版本为 alpha.3；这不代表已验证滚动升级或跨主机接管。
+
 ## 从 alpha.1 升级
 
-本次执行检查点合同有变化。请先用 alpha.1 完成现有任务，再一起升级 API 与 Worker；不要混用版本，也不提供旧检查点的自动迁移。合成演示推荐使用新的专用数据库，保留需要的旧记录。详见 [DBOS 恢复与升级说明](dbos-notes.md)。
+alpha.1 到 alpha.2 的执行检查点合同有变化。请先用 alpha.1 完成现有任务，再一起升级 API 与 Worker；不要混用版本，也不提供旧检查点的自动迁移。合成演示推荐使用新的专用数据库，保留需要的旧记录。详见 [DBOS 恢复与升级说明](dbos-notes.md)。
